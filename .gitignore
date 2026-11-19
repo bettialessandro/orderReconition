@@ -1,0 +1,14 @@
+# Documenti originali fornitori e IMPORTATI (3,4 GB, riservati)
+Data/
+
+# Cache testo estratto dai PDF (si rigenera con tools/build_dataset.py)
+dataset/_pdf_text_cache/
+
+# Output di analisi temporanei
+tools/survey.log
+tools/survey.json
+
+__pycache__/
+*.pyc
+~$*
+Thumbs.db
