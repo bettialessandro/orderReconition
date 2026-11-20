@@ -1,0 +1,4 @@
+# vLLM e torch sono gia' nell'immagine base (vllm/vllm-openai:v0.32.0-x86_64-cu129)
+runpod==1.10.0
+pdfplumber==0.11.10
+openpyxl==3.1.5

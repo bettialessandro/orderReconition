@@ -1,0 +1,8 @@
+# Nel contesto di build serve solo il codice: niente dataset (dati commerciali), niente git
+*
+!Dockerfile
+!serverless/requirements.txt
+!serverless/handler.py
+!tools/build_dataset.py
+!tools/infer.py
+!tools/controlli.py

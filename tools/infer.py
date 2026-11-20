@@ -35,11 +35,19 @@ def call_model(text, mock=False):
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as r:
         content = json.loads(r.read())["choices"][0]["message"]["content"]
+    return parse_output(content)
+
+
+def parse_output(content):
+    """Risposta testuale del modello -> {"righe": [...]} (con "errore" se non interpretabile)."""
     try:
         out = json.loads(content)
-        return out if isinstance(out.get("righe"), list) else {"righe": [], "errore": "formato"}
     except json.JSONDecodeError:
         return {"righe": [], "errore": "json_non_valido", "raw": content[:500]}
+    if not isinstance(out, dict) or not isinstance(out.get("righe"), list):
+        return {"righe": [], "errore": "formato", "raw": content[:500]}
+    out["righe"] = [r for r in out["righe"] if isinstance(r, dict)]
+    return out
 
 
 def merge_rows(per_chunk):
@@ -62,13 +70,16 @@ def merge_rows(per_chunk):
     return list(merged.values())
 
 
-def process(path, mock=False):
+def process(path, mock=False, extract_many=None):
+    """extract_many: funzione opzionale lista_blocchi -> lista_output; se assente il modello
+    viene chiamato blocco per blocco sull'endpoint SLM_URL (usata dal worker serverless,
+    che genera tutti i blocchi in un'unica chiamata batch)."""
     pages = B.pdf_pages(path) if path.lower().endswith(".pdf") else B.excel_pages(path)
     full = "\n".join(pages)
     if len(full.strip()) < 50:
         return {"file": path, "errore": "nessun testo estraibile: PDF scansionato, serve OCR", "righe": []}
     blocks = B.chunks(pages)
-    outs = [call_model(t, mock) for t in blocks]
+    outs = extract_many(blocks) if extract_many else [call_model(t, mock) for t in blocks]
     # controllo taglie per blocco, PRIMA dell'unione: merge_rows ricalcola qta dalle taglie
     # e nasconderebbe le incoerenze tra quantita' totale e quantita' per taglia
     taglie_sospette = []
