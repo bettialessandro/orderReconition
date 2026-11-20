@@ -17,6 +17,7 @@ import os, sys, json, re, argparse, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_dataset as B
+from controlli import abbina_righe, controlla_taglie
 
 SLM_URL = os.environ.get("SLM_URL", "http://localhost:8000/v1")
 SLM_MODEL = os.environ.get("SLM_MODEL", "orderreconition")
@@ -68,6 +69,18 @@ def process(path, mock=False):
         return {"file": path, "errore": "nessun testo estraibile: PDF scansionato, serve OCR", "righe": []}
     blocks = B.chunks(pages)
     outs = [call_model(t, mock) for t in blocks]
+    # controllo taglie per blocco, PRIMA dell'unione: merge_rows ricalcola qta dalle taglie
+    # e nasconderebbe le incoerenze tra quantita' totale e quantita' per taglia
+    taglie_sospette = []
+    for i, (o, t) in enumerate(zip(outs, blocks)):
+        nums_blocco = B.parse_numbers(t)
+        for r in o["righe"]:
+            problemi = controlla_taglie(r)
+            if not quantita_verificata(r, nums_blocco):
+                problemi.append("quantita_non_trovata_nel_documento")
+            if problemi:
+                taglie_sospette.append({"blocco": i, "articolo": r.get("articolo"),
+                                        "colore": r.get("colore"), "problemi": problemi})
     righe = merge_rows([o["righe"] for o in outs])
     nums_full = B.parse_numbers(full)
     tot = round(sum((r.get("costo") or 0) * (r.get("qta") or 0) for r in righe), 2)
@@ -78,36 +91,58 @@ def process(path, mock=False):
         "totale_trovato_nel_documento": bool(righe) and B.has_num(nums_full, tot),
         "righe_con_costo_non_trovato": [r["articolo"] for r in righe
                                         if not B.has_num(nums_full, r.get("costo") or -1)],
+        "righe_taglie_sospette": taglie_sospette,
     }
     controlli["da_verificare"] = (not controlli["totale_trovato_nel_documento"]
                                   or bool(controlli["errori_blocchi"])
-                                  or bool(controlli["righe_con_costo_non_trovato"]))
+                                  or bool(controlli["righe_con_costo_non_trovato"])
+                                  or bool(taglie_sospette))
     return {"file": path, "righe": righe, "controlli": controlli}
 
 
+def quantita_verificata(r, nums):
+    """Stesso criterio di build_dataset.qty_ok: la quantita' e' confermata dal documento se ne
+    compare l'importo riga, l'importo di ogni taglia o (se > 1) la quantita' totale."""
+    try:
+        costo, qta = float(r.get("costo")), float(r.get("qta"))
+        q_taglie = [float(t["qta"]) for t in r.get("taglie") or []]
+    except (TypeError, ValueError, KeyError):
+        return False
+    return (B.has_num(nums, costo * qta)
+            or (bool(q_taglie) and all(B.has_num(nums, costo * q) for q in q_taglie))
+            or (qta > 1 and B.has_num(nums, qta)))
+
+
 def evaluate(jsonl, mock=False):
-    key = lambda r: (B.norm(r["articolo"]), B.norm(r["colore"] or ""))
-    sizes = lambda r: sorted((str(t["taglia"]), int(t["qta"])) for t in r["taglie"])
-    tp = fp = fn = exact = doc_ok = verified = n = 0
+    """Abbinamento righe con colore tollerante (controlli.abbina_righe); riporta anche quante
+    coppie hanno il colore identico, per confronto con la misura rigida."""
+    def sizes(r):
+        try:
+            return sorted((B.norm(t["taglia"]), float(t["qta"])) for t in r.get("taglie") or [])
+        except (TypeError, ValueError, KeyError):
+            return None
+    tp = tp_rigido = fp = fn = exact = doc_ok = verified = segnalati = n = 0
     for line in open(jsonl, encoding="utf-8"):
         d = json.loads(line); n += 1
         res = process(os.path.join(B.SRC, d["meta"]["sorgente"]), mock)
-        gold = {key(r): r for r in d["righe_attese"]}
-        pred = {key(r): r for r in res["righe"]}
-        hit = gold.keys() & pred.keys()
-        tp += len(hit); fp += len(pred.keys() - gold.keys()); fn += len(gold.keys() - pred.keys())
-        ex = sum(1 for k in hit if abs((pred[k].get("costo") or 0) - gold[k]["costo"]) < 0.01
-                 and sizes(pred[k]) == sizes(gold[k]))
+        coppie, mancanti, in_piu = abbina_righe(d["righe_attese"], res["righe"])
+        tp += len(coppie); tp_rigido += sum(1 for *_, esatto in coppie if esatto)
+        fp += len(in_piu); fn += len(mancanti)
+        ex = sum(1 for g, p, _ in coppie if abs((p.get("costo") or 0) - g["costo"]) < 0.01
+                 and sizes(p) == sizes(g))
         exact += ex
-        doc_ok += int(ex == len(gold) == len(pred))
+        doc_ok += int(ex == len(d["righe_attese"]) == len(res["righe"]))
         verified += int(res.get("controlli", {}).get("totale_trovato_nel_documento", False))
-        print(f'{d["meta"]["sorgente"][:70]:70} attese={len(gold):3} trovate={len(pred):3} esatte={ex:3}', flush=True)
+        segnalati += int(res.get("controlli", {}).get("da_verificare", False))
+        print(f'{d["meta"]["sorgente"][:70]:70} attese={len(d["righe_attese"]):3} '
+              f'trovate={len(res["righe"]):3} esatte={ex:3}', flush=True)
     p = tp / (tp + fp) if tp + fp else 0
     r = tp / (tp + fn) if tp + fn else 0
     print(json.dumps({"documenti": n, "precisione_righe": round(p, 3), "richiamo_righe": round(r, 3),
+                      "righe_abbinate_con_colore_identico": tp_rigido, "righe_abbinate": tp,
                       "righe_esatte_su_attese": round(exact / (tp + fn), 3) if tp + fn else 0,
-                      "documenti_perfetti": doc_ok, "documenti_con_totale_verificato": verified}, indent=1))
-
+                      "documenti_perfetti": doc_ok, "documenti_con_totale_verificato": verified,
+                      "documenti_da_verificare": segnalati}, indent=1))
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
